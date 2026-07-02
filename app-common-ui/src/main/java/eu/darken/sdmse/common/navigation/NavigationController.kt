@@ -14,6 +14,7 @@ import javax.inject.Singleton
 @Singleton
 class NavigationController @Inject constructor() {
     private var _backStack: NavBackStack<NavKey>? = null
+    private var homeRoute: NavKey? = null
 
     private val backStack: NavBackStack<NavKey>
         get() = _backStack ?: error("NavigationController not initialized")
@@ -32,9 +33,12 @@ class NavigationController @Inject constructor() {
         val inclusive: Boolean,
     )
 
-    fun setup(backStack: NavBackStack<NavKey>) {
-        log(TAG) { "setup()" }
+    fun setup(backStack: NavBackStack<NavKey>, homeRoute: NavKey? = null) {
+        log(TAG) { "setup(homeRoute=$homeRoute)" }
         _backStack = backStack
+        // Assign unconditionally: this controller is a singleton, a home route from a previous
+        // setup() must not leak into a context that didn't supply one (e.g. onboarding).
+        this.homeRoute = homeRoute
         if (pendingActions.isNotEmpty()) {
             val drain = pendingActions.toList()
             pendingActions.clear()
@@ -44,6 +48,15 @@ class NavigationController @Inject constructor() {
     }
 
     fun up(): Boolean {
+        // Deep links seed a rootless stack (just the target screen) so the system back gesture
+        // exits natively. "Up" from such a sole entry synthesizes the home parent instead of
+        // dead-ending — mirroring Android's classic parentActivityName synthetic up-stack.
+        val home = homeRoute
+        if (backStack.size == 1 && home != null && backStack.last() != home) {
+            log(TAG) { "up() from rootless entry ${backStack.last()} → home ($home)" }
+            backStack[0] = home
+            return true
+        }
         // Don't remove the last element to prevent empty backstack
         if (backStack.size <= 1) {
             log(TAG) { "up() prevented removing the last element in backstack" }
@@ -52,6 +65,23 @@ class NavigationController @Inject constructor() {
         val removed = backStack.removeLastOrNull()
         log(TAG) { "up() to ${backStack.lastOrNull()} (removed $removed)" }
         return removed != null
+    }
+
+    /**
+     * Plain app (re)entry (launcher icon, widget open-app tap — no deep-link payload): a live but
+     * backgrounded ROOTLESS deep-link stack must not resurface. On Android 12+ backing out of a
+     * task root can move the task to the background instead of finishing it, so a leftover
+     * [Analyzer]-rooted stack would otherwise greet every future entry. Resets to [homeRoute] when
+     * the stack's root isn't home; home-rooted stacks keep normal resume-where-you-left-off
+     * semantics, and Recents re-entry (no new intent) still resumes the deep-link session.
+     */
+    fun resetToHomeOnPlainEntry() {
+        val home = homeRoute ?: return
+        val stack = _backStack ?: return
+        if (stack.isEmpty() || stack.first() == home) return
+        log(TAG) { "resetToHomeOnPlainEntry(): clearing rootless deep-link stack ${stack.toList()}" }
+        stack[0] = home
+        while (stack.size > 1) stack.removeLastOrNull()
     }
 
     fun goTo(

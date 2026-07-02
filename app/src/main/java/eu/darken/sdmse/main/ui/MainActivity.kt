@@ -49,12 +49,15 @@ import eu.darken.sdmse.common.debug.logging.logTag
 import eu.darken.sdmse.common.error.ErrorEventHandler
 import eu.darken.sdmse.common.navigation.LocalNavigationController
 import eu.darken.sdmse.common.navigation.NavigationController
+import eu.darken.sdmse.common.navigation.NavigationDestination
 import eu.darken.sdmse.common.navigation.NavigationEntry
 import eu.darken.sdmse.common.navigation.NavigationEventHandler
 import eu.darken.sdmse.common.navigation.UnknownDestinationScreen
 import eu.darken.sdmse.common.compose.settings.LocalUpgradeBadgeLabel
 import eu.darken.sdmse.common.compose.tour.GuidedTourHost
 import eu.darken.sdmse.common.navigation.routes.AppControlListRoute
+import eu.darken.sdmse.common.navigation.routes.DashboardRoute
+import eu.darken.sdmse.common.navigation.routes.DeviceStorageRoute
 import eu.darken.sdmse.common.navigation.routes.UpgradeRoute
 import eu.darken.sdmse.common.theming.SdmSeTheme
 import eu.darken.sdmse.main.core.CurriculumVitae
@@ -94,7 +97,18 @@ class MainActivity : ComponentActivity() {
 
         curriculumVitae.updateAppOpened()
 
-        savedIntent = intent
+        // Fresh launch: a shortcut/widget intent seeds the back stack with ONLY the target screen (see
+        // Navigation()), so we never navigate as a second step. A second-step goTo() would race the
+        // back-stack setup on a CLEAR_TASK recreate (the widget/launcher intents all CLEAR_TASK, and
+        // MainActivity is launchMode=standard) and get discarded, landing on the Dashboard. Gating on
+        // savedInstanceState avoids re-consuming the same intent after a config change. onNewIntent
+        // deliveries to an already-live instance still route via onResume → handleShortcutAction.
+        // Deep links are ignored while onboarding is incomplete — they must not skip consent.
+        launchRoute = if (savedInstanceState == null && vm.startRoute == DashboardRoute) {
+            shortcutRoute(intent)
+        } else {
+            null
+        }
 
         setContent {
             // Prime WindowInsets to prevent UI jumping on first composition
@@ -149,9 +163,23 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     private fun Navigation() {
-        val backStack = rememberNavBackStack(vm.startRoute)
+        // A deep link seeds a ROOTLESS stack — just [launchRoute], no Dashboard underneath. With a
+        // 1-entry stack Nav3 doesn't intercept the back gesture, so the system's native predictive
+        // back-to-home exits in one gesture; the top-bar arrow reaches the Dashboard through the
+        // controller's synthetic up-to-home fallback instead. Normal launches seed [startRoute]. On a
+        // config change rememberNavBackStack restores the saved stack and ignores these args.
+        val backStack = rememberNavBackStack(launchRoute ?: vm.startRoute)
 
-        LaunchedEffect(Unit) { navCtrl.setup(backStack) }
+        // Re-register on EVERY resume, not once: navCtrl is app-scoped, so if another MainActivity
+        // instance ever stacks on top of this one (e.g. an external intent that defeats the system's
+        // root-intent matching), that instance's setup() takes over the singleton. When it finishes
+        // and this instance resumes, we must re-attach OUR stack — a one-shot LaunchedEffect left the
+        // controller wired to the dead instance's stack, freezing all navigation (device-confirmed).
+        // The home route enables up-to-Dashboard from rootless deep-link stacks; never during
+        // onboarding, where a synthetic "up" would skip consent.
+        LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+            navCtrl.setup(backStack, homeRoute = DashboardRoute.takeIf { vm.startRoute == DashboardRoute })
+        }
 
         // Breadcrumb logging
         LaunchedEffect(backStack.size) {
@@ -227,17 +255,37 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun handleShortcutAction(intent: Intent) {
-        val shortcutAction = intent.getStringExtra(ShortcutActivity.EXTRA_SHORTCUT_ACTION) ?: return
-        log(TAG, VERBOSE) { "Handling shortcut action: $shortcutAction" }
-
-        when (shortcutAction) {
-            ShortcutActivity.ACTION_OPEN_APPCONTROL -> navCtrl.goTo(AppControlListRoute)
-            ShortcutActivity.ACTION_UPGRADE -> navCtrl.goTo(UpgradeRoute())
+    // Map a shortcut/widget launch intent to its destination. Used both to seed the initial back
+    // stack for a fresh launch (onCreate) and to navigate an already-live instance (onResume, for
+    // onNewIntent deliveries).
+    private fun shortcutRoute(intent: Intent?): NavigationDestination? =
+        when (intent?.getStringExtra(ShortcutActivity.EXTRA_SHORTCUT_ACTION)) {
+            ShortcutActivity.ACTION_OPEN_APPCONTROL -> AppControlListRoute
+            ShortcutActivity.ACTION_OPEN_ANALYZER -> DeviceStorageRoute
+            ShortcutActivity.ACTION_UPGRADE -> UpgradeRoute()
+            else -> null
         }
+
+    private fun handleShortcutAction(intent: Intent) {
+        val route = shortcutRoute(intent)
+        if (route == null) {
+            // A plain delivery (launcher icon / widget open-app tap) onto the live singleTask
+            // instance: don't resume a leftover rootless deep-link stack.
+            navCtrl.resetToHomeOnPlainEntry()
+            return
+        }
+        // Same guard as the cold-start seeding: MainActivity is exported, so a shortcut-style
+        // intent could arrive via onNewIntent during onboarding — it must not skip consent.
+        if (vm.startRoute != DashboardRoute) {
+            log(TAG, VERBOSE) { "Ignoring shortcut action during onboarding: $route" }
+            return
+        }
+        log(TAG, VERBOSE) { "Handling shortcut action → $route" }
+        navCtrl.goTo(route)
     }
 
     private var savedIntent: Intent? = null
+    private var launchRoute: NavigationDestination? = null
 
     companion object {
         private val TAG = logTag("Main", "Activity")
