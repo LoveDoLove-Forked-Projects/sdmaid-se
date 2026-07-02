@@ -215,6 +215,21 @@ class SharedResourceTest : BaseTest() {
         srParent.addChild(srChild)
         srParent.addChild(srChild)
         srChild.isClosed shouldBe false
+
+        // A duplicate adoption must not leak a second keep-alive: closing the parent frees the child.
+        srParent.close()
+        srChild.isClosed shouldBe true
+    }
+
+    @Test fun `addChild ignores self-adoption`() = runTest2(autoCancel = true) {
+        val sr = SharedResource.createKeepAlive("test", this + Dispatchers.IO, Duration.ZERO)
+
+        val lease = sr.get()
+        sr.addChild(sr)
+        lease.close()
+
+        // Without the guard, the self-held child lease would keep us pinned open forever.
+        sr.isClosed shouldBe true
     }
 
     @Test fun `error during creation is forwarded`() = runTest2(autoCancel = true) {
@@ -910,6 +925,98 @@ class SharedResourceTest : BaseTest() {
 
         second.close()
         sr.close()
+    }
+
+    @Test
+    fun `addChild does not hold the parent lock across child acquisition`(): Unit = runBlocking {
+        val childStarted = CompletableDeferred<Unit>()
+        val childGate = CompletableDeferred<Unit>()
+        val parent = SharedResource<Int>(
+            tag = "parent",
+            parentScope = this + Dispatchers.IO,
+            stopTimeout = Duration.ZERO,
+            source = flow {
+                emit(1)
+                awaitCancellation()
+            },
+        )
+        val child = SharedResource<Int>(
+            tag = "child",
+            parentScope = this + Dispatchers.IO,
+            stopTimeout = Duration.ZERO,
+            source = flow {
+                childStarted.complete(Unit)
+                childGate.await() // a slow child startup, e.g. launching a root helper
+                emit(2)
+                awaitCancellation()
+            },
+        )
+
+        val parentLease = parent.get()
+        val adoption = launch(Dispatchers.IO) { parent.addChild(child) }
+        childStarted.await()
+
+        // While the child's slow startup is still in progress, the parent must stay fully usable —
+        // previously addChild held the parent's coreLock across child.get(), wedging this call.
+        val concurrent = withTimeout(5_000) { parent.get() }
+        concurrent.item shouldBe 1
+        concurrent.close()
+
+        childGate.complete(Unit)
+        adoption.join()
+        child.isClosed shouldBe false
+
+        parent.close()
+        child.isClosed shouldBe true
+    }
+
+    @Test
+    fun `addChild releases the child when the parent dies during adoption`(): Unit = runBlocking {
+        val childStarted = CompletableDeferred<Unit>()
+        val childGate = CompletableDeferred<Unit>()
+        val parent = SharedResource<Int>(
+            tag = "parent",
+            parentScope = this + Dispatchers.IO,
+            stopTimeout = Duration.ZERO,
+            source = flow {
+                emit(1)
+                awaitCancellation()
+            },
+        )
+        val child = SharedResource<Int>(
+            tag = "child",
+            parentScope = this + Dispatchers.IO,
+            stopTimeout = Duration.ZERO,
+            source = flow {
+                childStarted.complete(Unit)
+                childGate.await()
+                emit(2)
+                awaitCancellation()
+            },
+        )
+
+        parent.get()
+        val adoption = launch(Dispatchers.IO) { parent.addChild(child) }
+        childStarted.await()
+
+        try {
+            // The generation the adoption was decided for dies while the child is still starting up.
+            // Off-thread + timeout so a regression (addChild holding coreLock across child.get() would
+            // block close() until childGate opens) fails the test instead of hanging the worker.
+            withTimeout(5_000) {
+                withContext(Dispatchers.IO) { parent.close() }
+            }
+        } finally {
+            childGate.complete(Unit)
+        }
+        parent.isClosed shouldBe true
+
+        adoption.join()
+
+        // ...so the acquired keep-alive must be released instead of registered — nothing may pin the
+        // child open on behalf of a parent generation whose cleanup already ran.
+        child.isClosed shouldBe true
+        parent.isClosed shouldBe true
     }
 
     @Test
