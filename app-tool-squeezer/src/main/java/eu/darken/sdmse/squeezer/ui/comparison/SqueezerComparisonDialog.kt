@@ -1,20 +1,24 @@
 package eu.darken.sdmse.squeezer.ui.comparison
 
+import android.annotation.SuppressLint
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
+import android.view.MotionEvent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.add
 import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.twotone.Close
@@ -34,6 +38,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -105,6 +110,10 @@ fun SqueezerComparisonDialog(
         // Track EVERY dir created during this dialog's lifetime: tempDir is re-keyed on quality, so
         // a single tempDir snapshot at dispose only cleans the last one and orphans the rest.
         val createdDirs = remember { mutableListOf<File>() }
+
+        // The two zoom views, captured so their gestures can be linked (see linkZoomGestures).
+        var originalView by remember { mutableStateOf<CoilZoomImageView?>(null) }
+        var compressedView by remember { mutableStateOf<CoilZoomImageView?>(null) }
 
         LaunchedEffect(media, quality) {
             failed = false
@@ -196,6 +205,20 @@ fun SqueezerComparisonDialog(
             }
         }
 
+        // Link zoom/pan across both panes once both views exist, so pinching or panning one
+        // mirrors onto the other and the user can compare the same detail at the same zoom level.
+        val original = originalView
+        val compressed = compressedView
+        DisposableEffect(original, compressed) {
+            if (original != null && compressed != null) {
+                linkZoomGestures(original, compressed)
+            }
+            onDispose {
+                original?.setOnTouchListener(null)
+                compressed?.setOnTouchListener(null)
+            }
+        }
+
         val orientation = LocalConfiguration.current.orientation
         val isLandscape = orientation == Configuration.ORIENTATION_LANDSCAPE
 
@@ -223,14 +246,25 @@ fun SqueezerComparisonDialog(
                             label = originalLabel,
                             file = originalFile,
                             failed = failed,
+                            labelAlignment = Alignment.BottomStart,
+                            onViewReady = { originalView = it },
+                            onViewReleased = { if (originalView === it) originalView = null },
                             modifier = Modifier
                                 .weight(1f)
                                 .fillMaxHeight(),
+                        )
+                        PaneDivider(
+                            modifier = Modifier
+                                .fillMaxHeight()
+                                .width(1.dp),
                         )
                         ImagePane(
                             label = compressedLabel,
                             file = compressedFile,
                             failed = failed,
+                            labelAlignment = Alignment.BottomEnd,
+                            onViewReady = { compressedView = it },
+                            onViewReleased = { if (compressedView === it) compressedView = null },
                             modifier = Modifier
                                 .weight(1f)
                                 .fillMaxHeight(),
@@ -242,14 +276,25 @@ fun SqueezerComparisonDialog(
                             label = originalLabel,
                             file = originalFile,
                             failed = failed,
+                            labelAlignment = Alignment.TopCenter,
+                            onViewReady = { originalView = it },
+                            onViewReleased = { if (originalView === it) originalView = null },
                             modifier = Modifier
                                 .weight(1f)
                                 .fillMaxWidth(),
+                        )
+                        PaneDivider(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(1.dp),
                         )
                         ImagePane(
                             label = compressedLabel,
                             file = compressedFile,
                             failed = failed,
+                            labelAlignment = Alignment.BottomCenter,
+                            onViewReady = { compressedView = it },
+                            onViewReleased = { if (compressedView === it) compressedView = null },
                             modifier = Modifier
                                 .weight(1f)
                                 .fillMaxWidth(),
@@ -263,8 +308,8 @@ fun SqueezerComparisonDialog(
                         containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.65f),
                     ),
                     modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .windowInsetsPadding(WindowInsets.systemBars.add(WindowInsets.displayCutout))
+                        .align(Alignment.TopStart)
+                        .windowInsetsPadding(WindowInsets.systemBars.union(WindowInsets.displayCutout))
                         .padding(16.dp),
                 ) {
                     Icon(
@@ -282,21 +327,30 @@ private fun ImagePane(
     label: String,
     file: File?,
     failed: Boolean,
+    labelAlignment: Alignment = Alignment.TopStart,
+    onViewReady: (CoilZoomImageView) -> Unit = {},
+    onViewReleased: (CoilZoomImageView) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     Box(
-        modifier = modifier.background(Color.Black),
+        // Clip the zoom view to the pane: when zoomed in, its enlarged content would otherwise
+        // draw past its bounds and overlap the adjacent pane (Compose's AndroidView host doesn't
+        // clip the embedded view's overflow).
+        modifier = modifier
+            .clipToBounds()
+            .background(Color.Black),
     ) {
         when {
             file != null -> {
                 AndroidView(
-                    factory = { ctx -> CoilZoomImageView(ctx) },
+                    factory = { ctx -> CoilZoomImageView(ctx).also(onViewReady) },
                     update = { view ->
                         view.load(file) {
                             memoryCachePolicy(CachePolicy.DISABLED)
                             diskCachePolicy(CachePolicy.DISABLED)
                         }
                     },
+                    onRelease = onViewReleased,
                     modifier = Modifier.fillMaxSize(),
                 )
             }
@@ -318,17 +372,51 @@ private fun ImagePane(
         Surface(
             color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.65f),
             modifier = Modifier
-                .align(Alignment.TopStart)
-                .windowInsetsPadding(WindowInsets.systemBars.add(WindowInsets.displayCutout))
+                .align(labelAlignment)
+                .windowInsetsPadding(WindowInsets.systemBars.union(WindowInsets.displayCutout))
                 .padding(8.dp),
         ) {
             Text(
                 text = label,
                 color = MaterialTheme.colorScheme.onSecondaryContainer,
-                style = MaterialTheme.typography.labelMedium,
-                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                style = MaterialTheme.typography.labelLarge,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
             )
         }
+    }
+}
+
+@Composable
+private fun PaneDivider(modifier: Modifier = Modifier) {
+    Box(modifier = modifier.background(Color.White.copy(alpha = 0.3f)))
+}
+
+/**
+ * Mirrors zoom/pan gestures between the two comparison panes by replaying each view's touch events
+ * onto the other, so zooming into a detail on one side shows the same detail on the other. Both
+ * panes are always the same size, so identical view-local coordinates land on the same content
+ * point. Forwarded events go straight to [android.view.View.onTouchEvent] (bypassing the listener),
+ * so there is no feedback loop; returning false lets the originating view still handle the gesture.
+ */
+@SuppressLint("ClickableViewAccessibility")
+private fun linkZoomGestures(viewA: CoilZoomImageView, viewB: CoilZoomImageView) {
+    viewA.setOnTouchListener { _, event ->
+        val cloned = MotionEvent.obtain(event)
+        try {
+            viewB.onTouchEvent(cloned)
+        } finally {
+            cloned.recycle()
+        }
+        false
+    }
+    viewB.setOnTouchListener { _, event ->
+        val cloned = MotionEvent.obtain(event)
+        try {
+            viewA.onTouchEvent(cloned)
+        } finally {
+            cloned.recycle()
+        }
+        false
     }
 }
 
