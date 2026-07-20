@@ -221,7 +221,12 @@ class BillingConnection(
                     // out of the fresh stream (it would keep re-stamping the grace window).
                     val confirmed = (iap.getOrNull().orEmpty() + sub.getOrNull().orEmpty())
                         .sortedByDescending { it.purchaseTime }
-                    freshUpdatesChannel.trySend(FreshUpdate(confirmed, isFullSnapshot = isComplete))
+                    // A surviving overlay entry (purchase event newer than the query start, or of
+                    // a failed type) means this result does NOT prove total absence: it must not
+                    // count as a full snapshot, or an empty query racing a fresh purchase event
+                    // would start a false unconfirmed-grace episode.
+                    val provesAbsence = isComplete && next.overlay.isEmpty()
+                    freshUpdatesChannel.trySend(FreshUpdate(confirmed, isFullSnapshot = provesAbsence))
                 }
                 next
             }
@@ -275,6 +280,37 @@ class BillingConnection(
         return purchaseData
     }
 
+    // Strict SUBS-only query for the pre-purchase subscription gate: unlike refreshPurchases(),
+    // a failure propagates (no cross-type tolerance) — callers must be able to fail closed on
+    // "couldn't verify". Commits through the reducer like any query, so the reactive purchases
+    // flow picks up the fresh renewal state, and emits a partial fresh update: it proves what the
+    // SUBS query found, never the absence of anything it didn't cover.
+    suspend fun querySubscriptions(): Collection<Purchase> = refreshMutex.withLock {
+        log(TAG) { "querySubscriptions()" }
+        val genAtQueryStart = state.value.eventGen
+        val subs = queryPurchases(BillingClient.ProductType.SUBS)
+            .filter { it.purchaseState == PurchaseState.PURCHASED }
+        val committed = synchronized(reducerLock) {
+            val next = state.value.withQueryResults(
+                iap = null,
+                sub = subs,
+                genAtQueryStart = genAtQueryStart,
+            )
+            state.value = next
+            freshUpdatesChannel.trySend(FreshUpdate(subs, isFullSnapshot = false))
+            next
+        }
+        // The COMMITTED view, not the raw response: a purchase event that arrived after the query
+        // started survives the commit as a newer overlay and must reach the gate too — otherwise a
+        // just-purchased renewing sub could slip past the fail-closed double-billing check.
+        // Non-IAP overlays only; untyped (unknown product) entries stay in on the safe side.
+        val byToken = LinkedHashMap<String, Purchase>()
+        subs.forEach { byToken[it.purchaseToken] = it }
+        committed.overlay
+            .filter { it.type != Sku.Type.IAP }
+            .forEach { byToken[it.purchase.purchaseToken] = it.purchase }
+        byToken.values.sortedByDescending { it.purchaseTime }
+    }
     suspend fun acknowledgePurchase(purchase: Purchase): BillingResult {
         val ack = AcknowledgePurchaseParams.newBuilder().apply {
             setPurchaseToken(purchase.purchaseToken)

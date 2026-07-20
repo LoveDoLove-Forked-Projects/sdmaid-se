@@ -41,8 +41,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
@@ -54,7 +58,13 @@ import eu.darken.sdmse.common.compose.layout.SdmTooltipIconButton
 internal object UpgradeScreenTags {
     const val LOADING = "upgrade_loading"
     const val ACTIONS = "upgrade_actions"
+    const val MASCOT_HAPPY = "upgrade_mascot_happy"
+    const val MASCOT_GRUMPY = "upgrade_mascot_grumpy"
     const val FOSS_SPONSOR = "upgrade_foss_sponsor"
+    const val FOSS_STATUS_FREE = "upgrade_foss_status_free"
+    const val FOSS_STATUS_UPGRADED = "upgrade_foss_status_upgraded"
+    const val FOSS_SHOW_OPTIONS = "upgrade_foss_show_options"
+    const val FOSS_DONATE = "upgrade_foss_donate"
     const val GPLAY_SUBSCRIPTION = "upgrade_gplay_subscription"
     const val GPLAY_IAP = "upgrade_gplay_iap"
     const val GPLAY_RESTORE = "upgrade_gplay_restore"
@@ -62,12 +72,42 @@ internal object UpgradeScreenTags {
     const val GPLAY_RESTORE_BANNER_ACTION = "upgrade_gplay_restore_banner_action"
     const val GPLAY_UNAVAILABLE = "upgrade_gplay_unavailable"
     const val GPLAY_RETRY = "upgrade_gplay_retry"
-    const val GPLAY_RECOMMENDED = "upgrade_gplay_recommended"
+    const val GPLAY_OWNED_HERO = "upgrade_gplay_owned_hero"
+    const val GPLAY_OWNED_IAP = "upgrade_gplay_owned_iap"
+    const val GPLAY_OWNED_SUB = "upgrade_gplay_owned_sub"
+    const val GPLAY_MANAGE_SUB = "upgrade_gplay_manage_sub"
+    const val GPLAY_GRACE = "upgrade_gplay_grace"
+    const val GPLAY_GRACE_SPINNER = "upgrade_gplay_grace_spinner"
+    const val GPLAY_GRACE_RESTORE = "upgrade_gplay_grace_restore"
+}
+
+// Composed app title with the flavor postfix highlighted in the upgraded color while Pro is
+// active — the same treatment the dashboard title card uses.
+@Composable
+internal fun upgradeScreenTitle(upgraded: Boolean): AnnotatedString = buildAnnotatedString {
+    append(stringResource(CommonR.string.app_name))
+    append(" ")
+    if (upgraded) pushStyle(SpanStyle(color = colorResource(R.color.colorUpgraded)))
+    append(stringResource(R.string.app_name_upgrade_postfix))
+    if (upgraded) pop()
 }
 
 @Composable
 internal fun UpgradeScreenScaffold(
     @StringRes titleRes: Int,
+    onNavigateUp: () -> Unit,
+    snackbarHostState: SnackbarHostState? = null,
+    content: @Composable (PaddingValues) -> Unit,
+) = UpgradeScreenScaffold(
+    title = AnnotatedString(stringResource(titleRes)),
+    onNavigateUp = onNavigateUp,
+    snackbarHostState = snackbarHostState,
+    content = content,
+)
+
+@Composable
+internal fun UpgradeScreenScaffold(
+    title: AnnotatedString,
     onNavigateUp: () -> Unit,
     snackbarHostState: SnackbarHostState? = null,
     content: @Composable (PaddingValues) -> Unit,
@@ -79,7 +119,7 @@ internal fun UpgradeScreenScaffold(
         modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
             CenterAlignedTopAppBar(
-                title = { Text(stringResource(titleRes)) },
+                title = { Text(title) },
                 navigationIcon = {
                     SdmTooltipIconButton(
                         icon = Icons.AutoMirrored.TwoTone.ArrowBack,
@@ -131,11 +171,14 @@ internal fun UpgradeScreenContent(
 internal fun UpgradeMascot(
     size: Dp,
     modifier: Modifier = Modifier,
+    happy: Boolean = true,
 ) {
     Image(
-        painter = painterResource(R.drawable.sdm_happy),
+        painter = painterResource(if (happy) R.drawable.sdm_happy else R.drawable.sdm_not_happy),
         contentDescription = null,
-        modifier = modifier.size(size),
+        modifier = modifier
+            .size(size)
+            .testTag(if (happy) UpgradeScreenTags.MASCOT_HAPPY else UpgradeScreenTags.MASCOT_GRUMPY),
     )
 }
 
@@ -143,6 +186,7 @@ internal fun UpgradeMascot(
 internal fun UpgradeHeader(
     mascotSize: Dp,
     modifier: Modifier = Modifier,
+    happy: Boolean = true,
 ) {
     Box(
         modifier = modifier.fillMaxWidth(),
@@ -155,6 +199,7 @@ internal fun UpgradeHeader(
             UpgradeMascot(
                 size = mascotSize,
                 modifier = Modifier.padding(16.dp),
+                happy = happy,
             )
         }
     }
@@ -187,6 +232,7 @@ internal fun UpgradeSectionCard(
     modifier: Modifier = Modifier,
     iconTint: Color = Color.Unspecified,
     colors: CardColors? = null,
+    leading: (@Composable () -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val cardColors = colors ?: CardDefaults.elevatedCardColors(
@@ -203,24 +249,46 @@ internal fun UpgradeSectionCard(
                 .padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = null,
-                    tint = if (iconTint == Color.Unspecified) MaterialTheme.colorScheme.primary else iconTint,
-                )
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
+            UpgradeSectionHeader(
+                title = title,
+                icon = icon,
+                iconTint = iconTint,
+                leading = leading,
+            )
             content()
         }
+    }
+}
+
+// The icon+title header every section card leads with — also usable standalone so headerless
+// cards (like the offers action card) can join the same visual pattern.
+@Composable
+internal fun UpgradeSectionHeader(
+    title: String,
+    icon: ImageVector,
+    modifier: Modifier = Modifier,
+    iconTint: Color = Color.Unspecified,
+    leading: (@Composable () -> Unit)? = null,
+) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        if (leading != null) {
+            leading()
+        } else {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = if (iconTint == Color.Unspecified) MaterialTheme.colorScheme.primary else iconTint,
+            )
+        }
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+        )
     }
 }
 
@@ -325,94 +393,6 @@ internal fun UpgradeActionCard(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(8.dp),
             content = content,
-        )
-    }
-}
-
-@Composable
-internal fun UpgradeOfferCard(
-    title: String,
-    price: String?,
-    supportingText: String?,
-    modifier: Modifier = Modifier,
-    emphasized: Boolean = false,
-    badgeText: String? = null,
-    content: @Composable ColumnScope.() -> Unit,
-) {
-    val colors = if (emphasized) {
-        CardDefaults.elevatedCardColors(
-            containerColor = MaterialTheme.colorScheme.secondaryContainer,
-            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-        )
-    } else {
-        CardDefaults.elevatedCardColors(
-            containerColor = MaterialTheme.colorScheme.surface,
-        )
-    }
-
-    ElevatedCard(
-        modifier = modifier.fillMaxWidth(),
-        colors = colors,
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.Top,
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                Column(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Text(
-                        text = title,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    price?.let {
-                        Text(
-                            text = it,
-                            style = MaterialTheme.typography.headlineSmall,
-                        )
-                    }
-                }
-                badgeText?.let {
-                    UpgradeBadge(
-                        text = it,
-                        modifier = Modifier.testTag(UpgradeScreenTags.GPLAY_RECOMMENDED),
-                    )
-                }
-            }
-
-            supportingText?.let {
-                UpgradeHintText(text = it)
-            }
-
-            content()
-        }
-    }
-}
-
-@Composable
-internal fun UpgradeBadge(
-    text: String,
-    modifier: Modifier = Modifier,
-) {
-    Surface(
-        modifier = modifier,
-        color = MaterialTheme.colorScheme.tertiary,
-        contentColor = MaterialTheme.colorScheme.onTertiary,
-        shape = CardDefaults.shape,
-    ) {
-        Text(
-            text = text,
-            style = MaterialTheme.typography.labelSmall,
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
         )
     }
 }

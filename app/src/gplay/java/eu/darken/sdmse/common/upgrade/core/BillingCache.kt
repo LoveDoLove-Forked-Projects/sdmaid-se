@@ -28,6 +28,7 @@ class BillingCache @Inject constructor(
     // source of truth for key name and encoding.
     private val lastProStateAtKey = longPreferencesKey("gplay.cache.lastProAt")
     private val lastProStateSkuKey = stringPreferencesKey("gplay.cache.lastProSku")
+    private val proUnconfirmedSinceKey = longPreferencesKey("gplay.cache.proUnconfirmedAt")
 
     val lastProStateAt = dataStore.createValue(
         key = lastProStateAtKey,
@@ -40,12 +41,23 @@ class BillingCache @Inject constructor(
         writer = basicWriter(),
     )
 
-    // One transaction for both values: the timestamp gates the grace period and the SKU modifies
-    // its window length — they must never be observable half-updated.
+    // Start of the current "fresh data can't confirm Pro" episode (0 = none/confirmed). Drives the
+    // delayed grace hint on the upgrade screen; stamped only from fresh billing reconciliations —
+    // see UpgradeRepoGplay.recordProUnconfirmed().
+    val proUnconfirmedSince = dataStore.createValue(
+        key = proUnconfirmedSinceKey,
+        reader = basicReader(0L),
+        writer = basicWriter(),
+    )
+
+    // One transaction for all three values: the timestamp gates the grace period, the SKU modifies
+    // its window length, and a confirmation closes any unconfirmed episode — none of it may be
+    // observable half-updated.
     suspend fun stampLastProState(skuId: String, at: Long) {
         dataStore.edit { prefs ->
             prefs[lastProStateSkuKey] = skuId
             prefs[lastProStateAtKey] = at
+            prefs[proUnconfirmedSinceKey] = 0L
         }
     }
 }
